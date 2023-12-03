@@ -7,6 +7,8 @@ import time
 
 import logging
 
+from .constants import EXCEPT_KEYS
+
 logger_ = logging.getLogger('__main__')
 
 
@@ -89,3 +91,7 @@ def timestamp():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
+def to_device(batch_data, device, except_keys=EXCEPT_KEYS):
+    for key, value in batch_data.items():
+        if key not in except_keys:
+            batch_data[key] = value.to(device)

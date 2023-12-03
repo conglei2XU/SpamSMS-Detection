@@ -1,0 +1,4 @@
+SPAN_PAD = [3, 5]
+LABEL_PAD = -100
+MAX_SENT_LENGTH = 4000
+EXCEPT_KEYS = ['spans']
