@@ -7,7 +7,7 @@ import time
 
 import logging
 
-from .constants import EXCEPT_KEYS
+from utilis.constants import EXCEPT_KEYS
 
 logger_ = logging.getLogger('__main__')
 

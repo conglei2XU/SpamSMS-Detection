@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 
-def csv_reader(file_path, keys=('text', 'label', 'spans')):
+def csv_reader(file_path, keys=('text', 'label')):
     """
     generate data as described in keys
     """

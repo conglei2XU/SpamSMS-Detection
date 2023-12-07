@@ -35,7 +35,7 @@ def _to_df(data_dir):
             for sent in f:
                 all_samples.append([sent, file])
     data_df = pd.DataFrame(all_samples, columns=['content', 'label'])
-    json.dump(label_mapping, open('label_mapping.json', 'w', encoding='utf-8'))
+    json.dump(label_mapping, open('../label_mapping.json', 'w', encoding='utf-8'))
     return data_df
 
 

@@ -1,33 +1,35 @@
 import os
+import json
 
-import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from transformers import BertTokenizer, get_linear_schedule_with_warmup
 
-from TransformerBased import PretrainedModels
-from pipeline.Dataset import DocDataset
+from TransformerBased import PretrainSentModel, LongFormer
+from pipeline.Dataset import SentDataset, DocDataset
 from utilis.reader import csv_reader
+from utilis.constants import *
 
 DATACLASS = {
-    'doc': DocDataset
+    'sent': SentDataset,
+    'doc-span': DocDataset
 }
 
 READER = {
     'csv': csv_reader
-
 }
 
-SPAN_PAD = [3, 5]
-LABEL_PAD = -100
-MAX_SENT_LENGTH = 4000
+MODELS = {
+    'sent': PretrainSentModel,
+    'doc-span': LongFormer
+}
 
 
 class PreTraining:
     def __init__(self,
                  train_arguments,
-                 model_arguments, ):
+                 model_arguments):
         # model config
         self.hidden_dim = model_arguments.hidden_dim
         self.batch_size = train_arguments.batch_size
@@ -52,13 +54,24 @@ class PreTraining:
 
         # post-processing after initialization
         self.train, self.val, self.test = self.init_dataset()
-        self.label2idx = self.train.label2idx
+        if os.path.exists(train_arguments.label_mapping):
+            self.label2idx = json.load(open(train_arguments.label_mapping, 'r', encoding='utf-8'))
+            self.train.label2idx = self.label2idx
+        else:
+            self.label2idx = self.train.label2idx
+            json.dump(self.label2idx, open('label_mapping.json', 'w', encoding='utf-8'))
+        self.val.label2idx = self.label2idx
+        self.test.label2idx = self.label2idx
+
+        self.idx2label = {}
+        for key, value in self.label2idx.items():
+            self.idx2label[value] = key
 
     def create_loader(self, collate_fn=None, data_sampler=None):
-        train_loader = DataLoader(self.train, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn,
+        train_loader = DataLoader(self.train, batch_size=self.batch_size, collate_fn=collate_fn,
                                   sampler=data_sampler)
-        val_loader = DataLoader(self.val, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn)
-        test_loader = DataLoader(self.test, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn)
+        val_loader = DataLoader(self.val, batch_size=self.batch_size, collate_fn=collate_fn)
+        test_loader = DataLoader(self.test, batch_size=self.batch_size, collate_fn=collate_fn)
         return train_loader, val_loader, test_loader
 
     def init_dataset(self):
@@ -70,7 +83,11 @@ class PreTraining:
     def prepare_model(self):
         if self.method == 'long-attention':
             tokenizer = BertTokenizer.from_pretrained(self.model_path)
-            model = LongFormer(self.model_path, self.hidden_dim, len(self.label2idx))
+            try:
+                model_class = MODELS[self.task_type]
+                model = model_class(self.model_path, self.hidden_dim, len(self.label2idx))
+            except KeyError:
+                raise f"{self.task_type} doesn't have a corresponding model "
             return tokenizer, model
 
     def prepare_optimizer(self, model, data_loader):

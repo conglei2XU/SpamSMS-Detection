@@ -4,15 +4,15 @@ from dataclasses import field, dataclass
 @dataclass
 class LongFormerArguments:
     hidden_dim: int = field(default=768)
-    model_path: str = field(default='cache/Longformer')
+    model_path: str = field(default='cache/bert-chinese')
 
 
 @dataclass
 class TrainArguments:
     seed: int = field(default=42)
-    epoch: int = field(default=30)
-    batch_size: int = field(default=8)
-    learning_rate: float = field(default=1e-3)
+    epoch: int = field(default=2)
+    batch_size: int = field(default=16)
+    learning_rate: float = field(default=5e-5)
     dropout_rate: float = field(default=0.2)
     warmup_step: int = field(default=5,
                              metadata={'help': "number of training steps to conduct warmup strategy"})
@@ -37,3 +37,8 @@ class TrainArguments:
     early_stop: int = field(default=5, metadata={'help': 'number of early stop steps'})
 
     save_to: str = field(default='saved_model', metadata={'help': 'directory used to save model'})
+    label_mapping: str = field(default='label_mapping.json', metadata={'help':
+                                                                       'saved label mapping for some specific tasks '
+                                                                       'with string label'})
+    best_model_path: str = field(default='saved_model/roberta-chinese_5.pth')
+    given_best_model: bool = field(default=False, metadata={'help': 'if give best model path'})
