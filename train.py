@@ -1,152 +1,213 @@
-import json
 import os
-import argparse
-import multiprocessing as mp
-from multiprocessing import Value, Lock
+import time
+import logging
+import random
+from collections import Counter
 
 import pickle
-import logging
-import tqdm
 import torch
-import torch.optim as optim
-from torch.optim.lr_scheduler import StepLR
-from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+import tqdm
+import numpy as np
+import multiprocessing as mp
+from multiprocessing import Value, Lock
 import torch.distributed as dist
-from transformers import PreTrainedTokenizer, AutoTokenizer, PretrainedConfig, AutoConfig
-from torch.utils.data import DataLoader
+import torch.utils.data.distributed
+import torch.multiprocessing as mp
+from transformers import HfArgumentParser
 
-from tools import log_wrapper
-from dataset import DatasetSpam
-from DataReader import csv_reader
-from model.TransformerBased import PretrainedModels
+from utilis.mixTool import log_wrapper, to_device
+from pipeline.BatchEditor import CollateFn, CollateFnLight
+from pipeline.pre_training import PreTraining, PreTrainingLight
+from pipeline.arguments import TrainArguments, LongFormerArguments
+from pipeline.evaluate import evaluate
 
-Reader = {
-    'csv': csv_reader
-}
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
+os.environ['MASTER_ADDR'] = '127.0.0.1'
+os.environ['MASTER_PORT'] = '9091'
 
-# os.environ['HTTP_PROXY'] = 'http://127.0.0.1:1080'
-# os.environ['HTTPS_PROXY'] = 'https://127.0.0.1:1080'
-
-
-class CollateFnSeq:
-    def __init__(self, tokenizer=None, is_split_into_words=False, seq_task=False, label2idx=None, idx2label=None):
-        self.tokenizer = tokenizer
-        self.is_split_into_words = is_split_into_words
-        self.seq_task = seq_task
-        self.label2idx = label2idx
-        self.idx2label = idx2label
-        self.batch_texts = []
-        self.batch_labels = []
-
-    def __call__(self, batch):
-        texts = []
-        labels = []
-        padded_labels = []
-
-        for text, label in batch:
-            texts.append(text)
-            labels.append(label)
-        self.batch_labels = labels
-        self.batch_texts = texts
-        batchify_input = self.tokenizer(texts, padding='longest', is_split_into_words=self.is_split_into_words,
-                                        truncation=True, return_tensors='pt')
-        if self.seq_task:
-            for idx, label in enumerate(labels):
-                label_id = []
-                pre_word = None
-                for word_idx in batchify_input.word_ids(batch_index=idx):
-                    if word_idx is None:
-                        label_id.append(-100)
-                    elif word_idx != pre_word:
-                        label_id.append(self.label2idx[label[word_idx]])
-                        pre_word = word_idx
-                    else:
-                        label_id.append(-100)
-                padded_labels.append(label_id)
-            batchify_input['labels'] = torch.tensor(padded_labels)
-        else:
-            batchify_input['labels'] = torch.tensor(labels)
-        return batchify_input
+best_f1 = Value('d', -1.0)
+best_f1_lock = Lock()
+stop_flag = Value('i', 0)
 
 
 def init_args():
-    args = argparse.ArgumentParser()
-    args.add_argument(
-        '--cache_dir',
-        type=str,
-        default='cache/',
-        help='path to save checkpoints of model, pretrained model file etc.'
-    )
-    args.add_argument('--dataset_path', type=str, default='spam/', help='location of dataset for training, testing '
-                                                                        'and validating')
-    args.add_argument('--dataset_type', type=str, default='csv', help='file type of data')
-    args.add_argument('--label_mapping', type=str, default='label_mapping.json', help='mapping label to corresponding '
-                                                                                      'id by this json file')
-    args.add_argument('--model_save_dir', type=str, default='final_models/', help='location for saving the best model')
-    args.add_argument('--transformer_model', type=str, default='bert_case_chinese', help='the name of the transformer '
-                                                                                         'model, using in the '
-                                                                                         'neuralnetwork')
-    args.add_argument('--lstm_size', type=int, default=300)
-    args.add_argument('--transformer_size', type=int, default=768)
-    args.add_argument('--epoch', type=int, default=30)
-    args.add_argument('--lr', type=float, default=1e-5, help='learning rate for neural network')
-    args.add_argument('--no_improve', type=int, default=5)
-
-    args.add_argument('--device', type=str, default='cpu')
-    args.add_argument('--world_size', type=int, default=1)
-
-    args_parse = args.parse_args()
-    return args_parse
+    parser = HfArgumentParser((TrainArguments, LongFormerArguments))
+    train_arguments, model_argument = parser.parse_args_into_dataclasses()
+    return train_arguments, model_argument
 
 
-def main(rank, args):
-    # args = init_args()
-    dist.init_process_group(backend='nccl', rank=rank, world_size=args.world_)
-    data_dir = args.dataset_path
-    file_type = args.dataset_type
-    label_mapping = json.load(open(args.label_mapping, 'r'))
-    data_reader = Reader[file_type]
-    # proxies = {'https': '127.0.0.1:1080', 'http': '127.0.0.1:1080'}
-    train_path = os.path.join(data_dir, 'train.' + file_type)
-    val_path = os.path.join(data_dir, 'val.' + file_type)
-    test_path = os.path.join(data_dir, 'test.' + file_type)
-    train_set = DatasetSpam(train_path, data_reader, label_mapping=label_mapping)
-    val_set = DatasetSpam(val_path, data_reader, label_mapping=label_mapping)
-    test_set = DatasetSpam(test_path, data_reader, label_mapping=label_mapping)
-    local_model_dir = os.path.join(args.cache_dir, args.transformer_model)
-    config_ = AutoConfig.from_pretrained(local_model_dir)
-    # config_ = PretrainedConfig.from_dict(json.load(open(local_config, 'r')))
-    transformer_dim = config_.hidden_size
-    tokenizer_ = AutoTokenizer.from_pretrained(os.path.join(args.cache_dir, args.transformer_model))
-    transformer_model = PretrainedModels(local_model_dir, len(label_mapping), transformer_dim,
-                                         pretrain_model_config=config_)
-    if torch.cuda.is_available() and args.device != 'cpu':
-        device = torch.device(args.device)
-    else:
-        device = torch.device('cpu')
-    train_loader = DataLoader(train_set)
+def fix_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.benchmark = False
 
 
-def trainer_transformer(
+def trainer(
         model,
-        train_loader,
-        val_loader,
-        args,
-        num_labels=None,
-        loss_fn=None,
-        warmup_strategy=None,
-        lr_decay_scheduler=None,
-        idx2label=None
+        loaders,
+        optimizer,
+        scheduler,
+        loss_fn,
+        train_config,
+        device,
+        rank
 ):
-    best_model_path = ''
+    train_loader, val_loader, test_loader = loaders
+    all_steps = len(train_loader) * train_config.epoch
+    train_loss_trend = []
+    global_step = 1
+    eval_f1_trend = []
+    patience_counter = 0
+    previous_model, best_model_path = None, None
+    for epoch_idx in range(train_config.epoch):
+        p_bar = tqdm.tqdm(train_loader)
+        epoch_step = len(train_loader)
+        local_step = 0
+        all_num, correct_num = 0, 0
+        model.train()
+        for batch_data in p_bar:
+            to_device(batch_data, device)
+            # convert label ( batch_size, num_span) to
+            labels = batch_data['label']
+            logit = model(**batch_data)
+            pred_ = torch.argmax(logit, dim=-1)
+            if train_config.task_type == 'doc-span':
+                labels = labels.view(-1)  # change labels from (batch_size, num_span) t0 (bach_size)
+            correct_num += torch.sum(labels == pred_).item()
+            all_num += pred_.size(0)
+            loss = loss_fn(logit, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            if global_step % 10 == 0 and (rank == -1 or rank == 0):
+                train_loss_trend.append(loss.item())
+            global_step += 1
+            local_step += 1
+            p_bar.set_description(f'Epoch: {epoch_idx + 1},'
+                                  f' Percentage: {local_step}/{epoch_step},'
+                                  f' Loss: {round(loss.item(), 2)},'
+                                  f' Accuracy: {round(correct_num / all_num, 2)}')
+        print(f'number of correct: {correct_num}; number of samples: {all_num}')
+        model.eval()
+        pred_report = evaluate(model=model,
+                               loader=val_loader,
+                               device=device,
+                               idx2label=train_config.idx2label
+                               )
+        over_acc = pred_report['overall accuracy']
+        if rank == -1 or rank == 0:
+            logger.info('-' * 50)
+            logger.info(f'Epoch: {epoch_idx + 1}/{train_config.epoch} \t'
+                        f' Global step: {global_step}/{all_steps}')
+            logger.info(f"Overall accuracy: {round(over_acc, 2)}")
+            logger.info(f"accuracy for each class: ")
+            class_report = pred_report['inner_report']
+            for label_name, value in class_report.items():
+                logger.info(f"class: {label_name} accuracy: {round(value, 2)}")
+            with best_f1_lock:
+                if over_acc > best_f1.value:
+                    logger.info(
+                        f'Epoch {epoch_idx + 1} has better accuracy {over_acc} than previous best {best_f1.value}')
+                    model_name = train_config.model_path.split('/')[-1]
+                    model_save_name = f'{model_name}_{epoch_idx}.pth'
+                    best_model_path = os.path.join(train_config.save_to, model_save_name)
+                    if not os.path.exists(train_config.save_to):
+                        os.makedirs(train_config.save_to)
+                    torch.save(model, best_model_path)
+                    if previous_model:
+                        os.remove(previous_model)
+                        previous_model = best_model_path
+                    best_f1.value = over_acc
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    model_name_ = train_config.model_path.split('/')[-1]
+                    if patience_counter > train_config.patience:
+                        train_loss_file = os.path.join(train_config.save_to, f'{model_name_}.bin')
+                        pickle.dump(train_loss_trend, open(train_loss_file, 'wb'))
+                        stop_flag.value = 1
+        if stop_flag.value == 1:
+            break
     return best_model_path
 
 
-if __name__ == "__main__":
-    args_ = init_args()
-    if args_.world_size > 1:
-        mp.spawn(main, nprocs=args_.world_size, args=(args_, ))
+def train(rank, train_argument, model_argument, logger_):
+    fix_seed(train_argument.seed)
+    if train_argument.is_light:
+        prepare = PreTrainingLight(train_argument, model_argument)
     else:
-        main(-1, args_)
+        prepare = PreTraining(train_argument, model_argument)
+
+    if rank != -1:
+        dist.init_process_group(backend='nccl', rank=rank, world_size=train_argument.nproc)
+        device = torch.device('cuda')
+        data_sampler = torch.utils.data.distributed.DistributedSampler(dataset=prepare.train,
+                                                                       num_replicas=train_argument.nproc,
+                                                                       rank=rank)
+    else:
+        device = torch.device(train_argument.device)
+        data_sampler = None
+    tokenizer, model = prepare.prepare_model()
+    if train_argument.is_light:
+        collate_fn = CollateFnLight(tokenizer, prepare.label2idx, task_type=prepare.task_type)
+    else:
+        collate_fn = CollateFn(tokenizer, prepare.label2idx, task_type=prepare.task_type)
+    train_loader, val_loader, test_loader = prepare.create_loader(collate_fn=collate_fn,
+                                                                  data_sampler=data_sampler)
+    model.to(device=device)
+    optimizer, scheduler, loss_fn = prepare.prepare_optimizer(model, train_loader)
+
+    if train_argument.given_best_model:
+        best_model_path = train_argument.best_model_path
+    else:
+        best_model_path = trainer(model=model,
+                                  loaders=(train_loader, val_loader, test_loader),
+                                  optimizer=optimizer,
+                                  scheduler=scheduler,
+                                  loss_fn=loss_fn,
+                                  train_config=prepare,
+                                  device=device,
+                                  rank=rank
+                                  )
+
+    if rank == 0 or rank == -1:
+        time_start = time.time()
+        logger.info(f'loading model from best model path: {best_model_path}')
+        best_model = torch.load(best_model_path)
+        # best_model = torch.quantization.quantize_dynamic(best_model, {torch.nn.Linear}, dtype=torch.qint8)
+        best_model.eval()
+        test_report = evaluate(
+            model=best_model,
+            loader=test_loader,
+            idx2label=prepare.idx2label,
+            device=device,
+            task_type=train_argument.task_type
+        )
+        time_eps = time.time() - time_start
+        logger_.info(f'Inference time: {time_eps}s')
+        over_acc = test_report['overall accuracy']
+        logger.info(f"Overall accuracy: {round(over_acc, 4)}")
+        logger.info(f"accuracy for each class: ")
+        class_report = test_report['inner_report']
+        for label_name, value in class_report.items():
+            logger.info(f"class: {label_name} accuracy: {round(value, 4)}")
+
+
+def main():
+    train_argument, model_argument = init_args()
+    log_wrapper(logger, base_dir=train_argument.log_dir)
+    if torch.cuda.is_available() and train_argument.nproc > 1:
+        mp.spawn(train,
+                 args=(train_argument, model_argument, logger,),
+                 nprocs=train_argument.nproc)
+    else:
+        train(-1, train_argument, model_argument, logger)
+
+
+if __name__ == "__main__":
     main()

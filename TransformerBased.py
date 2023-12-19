@@ -38,6 +38,10 @@ class PretrainSentModel(nn.Module):
         pred_ = self.linear_layer(last_hidden_state)  # (batch_size, num_categories)
         return pred_
 
+    def dynamic_quantization(self):
+        quantized_model = torch.quantization.quantize_dynamic(self.encoder, {torch.nn.Linear}, dtype=torch.qint8)
+        setattr(self, 'encoder', quantized_model)
+
 
 class LongFormer(nn.Module):
     def __init__(self, model_path, hidden_dim, num_labels):

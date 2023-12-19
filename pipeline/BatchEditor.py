@@ -24,6 +24,11 @@ class CollateFn:
         self.task_type = task_type
 
     def __call__(self, batch_data):
+        batchfy_input, batch_data_sep = self.processing(batch_data)
+        batchfy_input = self.post_process(batchfy_input, batch_data_sep)
+        return batchfy_input
+
+    def processing(self, batch_data):
         # (all_text, all_label, entity_spans[optional])
         batch_data_sep = _pre_processing(batch_data, task_type=self.task_type)
         batchfy_input = self.tokenizer(batch_data_sep[0],
@@ -33,7 +38,10 @@ class CollateFn:
                                        return_tensors='pt',
                                        max_length=MAX_SENT_LENGTH
                                        )
-        if self.task_type == 'doc':
+        return batchfy_input, batch_data_sep
+
+    def post_process(self, batchfy_input, batch_data_sep):
+        if self.task_type == 'doc-span':
 
             # pad_labels, pad_spans = _padding_token(all_labels, all_spans)
             pad_labels, pad_spans = _padding_entity(batchfy_input[1], batchfy_input[2])
@@ -44,6 +52,31 @@ class CollateFn:
         else:
             batchfy_input['label'] = torch.tensor(batch_data_sep[1], dtype=torch.long)
 
+        return batchfy_input
+
+
+class CollateFnLight(CollateFn):
+    def __init__(self,
+                 tokenizer,
+                 label2idx,
+                 idx2label=None,
+                 is_split=False,
+                 task_type='doc-span'
+                 ):
+        super(CollateFnLight, self).__init__(tokenizer, label2idx, idx2label, is_split, task_type)
+
+    def processing(self, batch_data):
+        batch_data_sep = _pre_processing(batch_data, task_type=self.task_type)
+        batch_token_idx, batch_token_len = self.tokenizer(batch_data_sep[0])
+        batchfy_input = {'input_ids': torch.tensor(batch_token_idx, dtype=torch.long),
+                         'input_lengths': batch_token_len}
+        return batchfy_input, batch_data_sep
+
+    def post_process(self, batchfy_input, batch_data_sep):
+        if self.task_type == 'doc-span':
+            pass
+        else:
+            batchfy_input['label'] = torch.tensor(batch_data_sep[1], dtype=torch.long)
         return batchfy_input
 
 
@@ -61,7 +94,7 @@ def _pre_processing(batch_data, task_type):
     entity_spans: pd.Dataframe (in this way, model can select list of indexes effciently
     """
     all_text, all_label = [], []
-    if task_type == 'doc':
+    if task_type == 'doc-span':
         entity_spans = []
     else:
         entity_spans = None
