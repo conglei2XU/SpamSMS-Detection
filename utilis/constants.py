@@ -4,4 +4,5 @@ LABEL_PAD_LIGHT = 0
 UNK = 1
 MAX_SENT_LENGTH = 500
 THRESHOLD = 2
-EXCEPT_KEYS = ['spans', 'input_lengths']
+KEYS = ('content', 'label')
+EXCEPT_KEYS = ('spans', 'input_lengths')

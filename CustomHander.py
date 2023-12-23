@@ -72,6 +72,7 @@ class DocHandler(BaseHandler):
         pred_list = list(map(lambda x: self.idx2label.get(x, 'Missing'), pred_))
         return [pred_list]
 
+
 def to_device(batch_data, device, except_keys=EXCEPT_KEYS):
     for key, value in batch_data.items():
         if key not in except_keys:

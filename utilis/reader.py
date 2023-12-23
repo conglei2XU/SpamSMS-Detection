@@ -1,8 +1,10 @@
 import numpy as np
 import pandas as pd
 
+from utilis.constants import KEYS
 
-def csv_reader(file_path, keys=('url', 'label')):
+
+def csv_reader(file_path, keys=KEYS):
     """
     generate data as described in keys
     """

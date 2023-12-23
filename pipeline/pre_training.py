@@ -83,9 +83,9 @@ class PreTraining:
         return train_loader, val_loader, test_loader
 
     def init_dataset(self):
-        train_dataset = self.Dataset(os.path.join(self.dataset_path, 'tmp.csv'), self.reader)
-        val_dataset = self.Dataset(os.path.join(self.dataset_path, 'tmp.csv'), self.reader)
-        test_dataset = self.Dataset(os.path.join(self.dataset_path, 'tmp.csv'), self.reader)
+        train_dataset = self.Dataset(os.path.join(self.dataset_path, 'val.csv'), self.reader)
+        val_dataset = self.Dataset(os.path.join(self.dataset_path, 'val.csv'), self.reader)
+        test_dataset = self.Dataset(os.path.join(self.dataset_path, 'val.csv'), self.reader)
         return train_dataset, val_dataset, test_dataset
 
     def prepare_model(self):

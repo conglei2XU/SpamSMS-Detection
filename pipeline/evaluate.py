@@ -13,10 +13,10 @@ def evaluate(model, loader, device, task_type=None, idx2label=None):
     report = {}
     correct = 0
     for batch_data in loader:
-        to_device(batch_data, device)
         target = batch_data['label']  # (batch_size)
         if task_type == 'doc':
-            target = target.view(-1) # the shape of target is (batch_size, num_span) when the task is doc classification
+            target = target.view(
+                -1)  # the shape of target is (batch_size, num_span) when the task is doc classification
         # pdb.set_trace()
         pred_score = model(**batch_data)  # (batch_size, num_categories)
         pred_class = torch.argmax(pred_score, dim=-1)  # (batch_size)
@@ -52,5 +52,3 @@ def evaluate(model, loader, device, task_type=None, idx2label=None):
     report['inner_report'] = inner_report
 
     return report
-
-
